@@ -182,5 +182,4 @@ def fsdp_main(args):
     # limit_all_gathers=fsdp_config.limit_all_gathers)
 
 if __name__ == '__main__':
-    fsdp_main()
-    
+    fsdp_main("")
