@@ -2,17 +2,25 @@
 import torch 
 import torch.nn as nn 
 import os
+import functools
 # load model from huggingface
 from transformers import T5Tokenizer, T5ForConditionalGeneration 
 
-model = T5ForConditionalGeneration.from_pretrained('t5-base') # The model 
-tokenizer = T5Tokenizer.from_pretrained('t5-base')
+# model = T5ForConditionalGeneration.from_pretrained('t5-base') # The model 
+# tokenizer = T5Tokenizer.from_pretrained('t5-base')
 
 # load the wikihow dataset
 from datasets import load_dataset
 from torch.utils.data import Dataset, DataLoader
-dataset = load_dataset('wikihow', 'all', data_dir='../examples/data',split="train")
-print(dataset[0])
+
+datafolder = '../examples/data'
+
+# add distributed package
+import torch.distributed as dist
+from torch.utils.data.distributed import DistributedSampler
+
+from transformers.models.t5.modeling_t5 import T5Block
+from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
 '''
 Dataset is made up of three parts: text, headline, title
 the text is the input and headline is the target we want to generate 
@@ -32,8 +40,8 @@ class data_config:
 @dataclass
 class model_config:
     device: str = 'cpu'
+    lr: float = 0.001
 
-os.environ['device'] = model_config.device
 
 # define a dataset that using tokenizer
 class wikihow(Dataset):
@@ -90,26 +98,7 @@ class wikihow(Dataset):
 
         return {"source_ids": source_ids, "source_mask": src_mask, "target_ids": target_ids, "target_mask": target_mask}
         
-dataset =  wikihow(tokenizer=tokenizer, type_path='train', num_samples=data_config.num_samples,  input_length=data_config.input_length, 
-                        output_length=data_config.output_length)
-print(len(dataset))
-train_loader = torch.utils.data.DataLoader(dataset, batch_size=data_config.batch_size, shuffle=False)
 
-val_dataset =  wikihow(tokenizer=tokenizer, type_path='train', num_samples=data_config.num_val_samples,  input_length=data_config.input_length, 
-                        output_length=data_config.output_length)
-val_dataloader = torch.utils.data.DataLoader(val_dataset, batch_size=data_config.test_batch_size)
-
-
-'''
-The tokenizer makes the input to be of the same length, for example 512. It maps the input text to a list of integers.
-'''
-
-for batch in train_loader:
-    print(batch["source_ids"].shape)
-    output = model(input_ids=batch["source_ids"],attention_mask=batch["source_mask"],labels=batch["target_ids"] )
-    print(output.keys())
-    print(output['loss'])
-    break
 
 # Train the network
 def train(model, train_loader, optimizer):
@@ -128,8 +117,6 @@ def train(model, train_loader, optimizer):
         losses[1] += len(batch)
     train_loss = losses[0] / losses[1]
     return train_loss
-optimizer = torch.optim.AdamW(model.parameters())
-train(model, train_loader, optimizer)
 
 @torch.inference_mode()
 def validation(model, val_loader):
@@ -148,19 +135,49 @@ def validation(model, val_loader):
     val_loss = losses[0] / losses[1]
     return val_loss
 
-epochs = 2
-for epoch in range(epochs):
-    train_loss = train(model, train_loader, optimizer)
-    val_loss = train(model, val_dataloader, optimizer)
-    print(f'train loss: {train_loss:.4f}, val loss: {val_loss:.4f}')
 
-'''
-Let's check the prediction on the test
-'''
-for batch in train_loader:
-    break 
-output = model.generate(batch["source_ids"])
-#model(input_ids=batch["source_ids"],attention_mask=batch["source_mask"],labels=batch["target_ids"] )
 
-print(tokenizer.batch_decode(batch["target_ids"]))
-print(tokenizer.batch_decode(output))
+def fsdp_main(args):
+    model = T5ForConditionalGeneration.from_pretrained('t5-base') # The model 
+    tokenizer = T5Tokenizer.from_pretrained('t5-base')
+
+    local_rank = int(os.environ['LOCAL_RANK'])
+    rank = int(os.environ['RANK'])
+    world_size = int(os.environ['WORLD_SIZE'])
+    dataset = load_dataset('wikihow', 'all', data_dir=datafolder,split="train")
+
+    dataset =  wikihow(tokenizer=tokenizer, type_path='train', num_samples=data_config.num_samples,  input_length=data_config.input_length, 
+                            output_length=data_config.output_length)
+    print(len(dataset))
+    train_loader = torch.utils.data.DataLoader(dataset, batch_size=data_config.batch_size, shuffle=False)
+
+    val_dataset =  wikihow(tokenizer=tokenizer, type_path='train', num_samples=data_config.num_val_samples,  input_length=data_config.input_length, 
+                            output_length=data_config.output_length)
+    val_dataloader = torch.utils.data.DataLoader(val_dataset, batch_size=data_config.test_batch_size)
+
+    sampler1 = DistributedSampler(train_dataset, rank=rank, num_replicas=world_size, shuffle=True)
+    sampler2 = DistributedSampler(val_dataset, rank=rank, num_replicas=world_size)
+
+    dist.init_process_group("nccl")
+
+    torch.cuda.set_device(local_rank)
+
+    device = "cuda"
+    model.to(device)
+    optimizer = optim.AdamW(model.parameters(), lr=model_config.lr)
+
+
+    t5_auto_wrap_policy = functools.partial(
+    transformer_auto_wrap_policy,
+    transformer_layer_cls={
+        T5Block,
+    })
+
+    model = FSDP(model,
+    # process_group=process_group_fsdp,       
+    # auto_wrap_policy=t5_auto_wrap_policy,
+    # mixed_precision=mixed_precision_policy,
+    # sharding_strategy=fsdp_config.sharding_strategy,
+    device_id=torch.cuda.current_device())#,
+    # limit_all_gathers=fsdp_config.limit_all_gathers)
+
