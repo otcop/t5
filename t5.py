@@ -1,7 +1,7 @@
 # fine tuning T5 pretrained model using the wikihow data
 import torch 
 import torch.nn as nn 
-
+import os
 # load model from huggingface
 from transformers import T5Tokenizer, T5ForConditionalGeneration 
 
@@ -12,8 +12,11 @@ tokenizer = T5Tokenizer.from_pretrained('t5-base')
 from datasets import load_dataset
 from torch.utils.data import Dataset, DataLoader
 dataset = load_dataset('wikihow', 'all', data_dir='../examples/data',split="train")
-
-
+print(dataset[0])
+'''
+Dataset is made up of three parts: text, headline, title
+the text is the input and headline is the target we want to generate 
+'''
 
 # define model configs
 from dataclasses import dataclass
@@ -22,7 +25,16 @@ class data_config:
     input_length: int = 512
     output_length: int = 150
     num_samples: int = 2
-    batch_size: int = 1
+    batch_size: int = 2
+    num_val_samples: int = 1
+    test_batch_size: int = 2
+
+@dataclass
+class model_config:
+    device: str = 'cpu'
+
+os.environ['device'] = model_config.device
+
 # define a dataset that using tokenizer
 class wikihow(Dataset):
     def __init__(self, tokenizer, type_path, num_samples, input_length, output_length, print_text=False):         
@@ -83,6 +95,15 @@ dataset =  wikihow(tokenizer=tokenizer, type_path='train', num_samples=data_conf
 print(len(dataset))
 train_loader = torch.utils.data.DataLoader(dataset, batch_size=data_config.batch_size, shuffle=False)
 
+val_dataset =  wikihow(tokenizer=tokenizer, type_path='train', num_samples=data_config.num_val_samples,  input_length=data_config.input_length, 
+                        output_length=data_config.output_length)
+val_dataloader = torch.utils.data.DataLoader(val_dataset, batch_size=data_config.test_batch_size)
+
+
+'''
+The tokenizer makes the input to be of the same length, for example 512. It maps the input text to a list of integers.
+'''
+
 for batch in train_loader:
     print(batch["source_ids"].shape)
     output = model(input_ids=batch["source_ids"],attention_mask=batch["source_mask"],labels=batch["target_ids"] )
@@ -90,10 +111,14 @@ for batch in train_loader:
     print(output['loss'])
     break
 
+# Train the network
 def train(model, train_loader, optimizer):
     model.train()
     losses = torch.zeros(2)
+    device = os.environ['device']
     for batch in train_loader:
+        for key in batch.keys():
+            batch[key] = batch[key].to(device)
         optimizer.zero_grad()
         output = model(input_ids=batch["source_ids"],attention_mask=batch["source_mask"],labels=batch["target_ids"] )
         loss = output["loss"]
@@ -106,8 +131,36 @@ def train(model, train_loader, optimizer):
 optimizer = torch.optim.AdamW(model.parameters())
 train(model, train_loader, optimizer)
 
+@torch.inference_mode()
+def validation(model, val_loader):
+    losses = torch.zeros(2)
+
+    for batch in train_loader:
+        for key in batch.keys():
+            batch[key] = batch[key].to(device)
+        optimizer.zero_grad()
+        output = model(input_ids=batch["source_ids"],attention_mask=batch["source_mask"],labels=batch["target_ids"] )
+        loss = output["loss"]
+        loss.backward()
+        optimizer.step()
+        losses[0] += loss.item()
+        losses[1] += len(batch)
+    val_loss = losses[0] / losses[1]
+    return val_loss
+
 epochs = 2
 for epoch in range(epochs):
     train_loss = train(model, train_loader, optimizer)
-    print(train_loss)
+    val_loss = train(model, val_dataloader, optimizer)
+    print(f'train loss: {train_loss:.4f}, val loss: {val_loss:.4f}')
 
+'''
+Let's check the prediction on the test
+'''
+for batch in train_loader:
+    break 
+output = model.generate(batch["source_ids"])
+#model(input_ids=batch["source_ids"],attention_mask=batch["source_mask"],labels=batch["target_ids"] )
+
+print(tokenizer.batch_decode(batch["target_ids"]))
+print(tokenizer.batch_decode(output))
