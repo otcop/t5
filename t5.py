@@ -181,3 +181,6 @@ def fsdp_main(args):
     device_id=torch.cuda.current_device())#,
     # limit_all_gathers=fsdp_config.limit_all_gathers)
 
+if __name__ == '__main__':
+    fsdp_main()
+    
